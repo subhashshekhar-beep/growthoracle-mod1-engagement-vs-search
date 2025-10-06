@@ -374,18 +374,30 @@ def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.Dat
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"]) if not d.empty else pd.DataFrame()
 
 # ---- Sidebar: thresholds & dates ----
+# ---- Sidebar: thresholds & dates (moved AFTER data is ready) ----
 with st.sidebar:
     st.subheader("Thresholds")
     TH = CONFIG["thresholds"].copy()
-    TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1)
-    TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50)
+    TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1, key="ctr_def_pct")
+    TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50, key="min_impr")
 
     st.markdown("---")
     st.subheader("Analysis Period")
-    end = date.today()
-    start = end - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
-    start_date = st.date_input("Start Date", value=start)
-    end_date = st.date_input("End Date", value=end)
+
+    if "date" in master_df.columns:
+        _dates = pd.to_datetime(master_df["date"], errors="coerce").dt.date.dropna()
+        _min_d, _max_d = _dates.min(), _dates.max()
+    else:
+        from datetime import date, timedelta
+        _max_d = date.today()
+        _min_d = _max_d - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
+
+    # Smart defaults: last N days, capped by CSV max date
+    _default_end = _max_d
+    _default_start = max(_min_d, _default_end - timedelta(days=CONFIG["defaults"]["date_lookback_days"]))
+
+    start_date = st.date_input("Start Date", value=_default_start, min_value=_min_d, max_value=_max_d, key="start_date_picker")
+    end_date   = st.date_input("End Date",   value=_default_end,   min_value=_min_d, max_value=_max_d, key="end_date_picker")
     if start_date > end_date:
         st.warning("Start date is after end date. Swapping.")
         start_date, end_date = end_date, start_date
@@ -555,6 +567,40 @@ if mismatch_df is not None and not mismatch_df.empty:
 else:
     st.info("No mismatch rows matched your thresholds and filters.")
 
+# ---- Visual: CTR vs Position bubble chart + expected CTR curve ----
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    vis = filtered_df.copy()
+    for c in ["Position","CTR","Impressions"]:
+        if c in vis.columns:
+            vis[c] = pd.to_numeric(vis[c], errors="coerce")
+
+    vis = vis.dropna(subset=["Position","CTR"])
+    if "Mismatch_Tag" not in vis.columns:
+        vis["Mismatch_Tag"] = None
+
+    fig = px.scatter(
+        vis, x="Position", y="CTR",
+        size="Impressions" if "Impressions" in vis.columns else None,
+        color="Mismatch_Tag",
+        hover_data=[c for c in ["msid","Title","Query","L1_Category","L2_Category","Impressions","Clicks"] if c in vis.columns],
+        title="CTR vs Position (bubble = Impressions)"
+    )
+
+    # Add expected CTR curve
+    pos_grid = np.linspace(1, 50, 200)
+    curve = [_expected_ctr_for_pos(p) for p in pos_grid]
+    fig.add_trace(go.Scatter(x=pos_grid, y=curve, mode="lines", name="Expected CTR", hoverinfo="skip"))
+
+    fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
+    st.plotly_chart(fig, use_container_width=True)
+
+except Exception as _e:
+    st.info("Install Plotly for charts: `pip install plotly`.")
+
+
 # Summary actions
 st.divider()
 st.subheader("🎯 Quick Recommendations")
@@ -567,3 +613,4 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
