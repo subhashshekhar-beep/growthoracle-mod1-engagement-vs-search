@@ -2,7 +2,7 @@
 # Engagement vs Search Performance Mismatch — Standalone Project
 # --------------------------------------------------------------
 # How to run:
-#   pip install streamlit pandas numpy statsmodels pyyaml
+#   pip install streamlit pandas numpy plotly statsmodels pyyaml
 #   streamlit run app.py
 
 import os, re, sys, json, logging
@@ -168,7 +168,7 @@ def read_csv_safely(upload, name: str, vc: ValidationCollector) -> Optional[pd.D
 
 # ---- Mapping ----
 def _guess_colmap(prod_df, ga4_df, gsc_df):
-    if prod_df is None or ga4_df is None or gsc_df is None:
+    if prod_df is None or gsc_df is None:
         return {}, {}, {}
     prod_map = {
         "msid": "Msid" if "Msid" in prod_df.columns else next((c for c in prod_df.columns if c.lower()=="msid"), None),
@@ -176,13 +176,15 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
         "path": "Path" if "Path" in prod_df.columns else next((c for c in prod_df.columns if "path" in c.lower()), None),
         "publish": "Publish Time" if "Publish Time" in prod_df.columns else next((c for c in prod_df.columns if "publish" in c.lower()), None),
     }
-    ga4_map = {
-        "msid": "customEvent:msid" if "customEvent:msid" in ga4_df.columns else next((c for c in ga4_df.columns if "msid" in c.lower()), None),
-        "date": "date" if "date" in ga4_df.columns else next((c for c in ga4_df.columns if c.lower()=="date"), None),
-        "users": "totalUsers" if "totalUsers" in ga4_df.columns else next((c for c in ga4_df.columns if "users" in c.lower()), None),
-        "engagement": "userEngagementDuration" if "userEngagementDuration" in ga4_df.columns else next((c for c in ga4_df.columns if "engagement" in c.lower()), None),
-        "bounce": "bounceRate" if "bounceRate" in ga4_df.columns else next((c for c in ga4_df.columns if "bounce" in c.lower()), None),
-    }
+    ga4_map = {}
+    if ga4_df is not None and not ga4_df.empty:
+        ga4_map = {
+            "msid": "customEvent:msid" if "customEvent:msid" in ga4_df.columns else next((c for c in ga4_df.columns if "msid" in c.lower()), None),
+            "date": "date" if "date" in ga4_df.columns else next((c for c in ga4_df.columns if c.lower()=="date"), None),
+            "users": "totalUsers" if "totalUsers" in ga4_df.columns else next((c for c in ga4_df.columns if "users" in c.lower()), None),
+            "engagement": "userEngagementDuration" if "userEngagementDuration" in ga4_df.columns else next((c for c in ga4_df.columns if "engagement" in c.lower()), None),
+            "bounce": "bounceRate" if "bounceRate" in ga4_df.columns else next((c for c in ga4_df.columns if "bounce" in c.lower()), None),
+        }
     gsc_map = {
         "date": "Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower()=="date"), None),
         "page": "Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
@@ -192,13 +194,11 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
         "ctr": "CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
         "pos": "Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
     }
-    # Try better date guesses
+    # Better publish-time guess
     if prod_df is not None and not prod_map.get("publish"):
         prod_dates = [c for c in detect_date_cols(prod_df) if "publish" in c.lower() or "time" in c.lower()]
         if prod_dates:
             prod_map["publish"] = prod_dates[0]
-    for df, mkey, key in [(ga4_df, "ga4", "date"), (gsc_df, "gsc", "date")]:
-        pass
     return prod_map, ga4_map, gsc_map
 
 # ---- Standardization & Merge ----
@@ -216,7 +216,6 @@ def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCol
         gs["date"] = pd.to_datetime(gs[mappings["gsc"]["date"]], errors="coerce").dt.date
 
     return p, g4, gs
-
 
 def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map):
     vc = ValidationCollector()
@@ -259,7 +258,7 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
             if col in gsc_df.columns:
                 gsc_df[col] = coerce_numeric(gsc_df[col], f"GSC.{col}", vc, clamp=clamp)
 
-        # CTR cleanup: accept %, decimals, or compute
+        # CTR cleanup
         if "CTR" in gsc_df.columns:
             if gsc_df["CTR"].dtype == "object":
                 tmp = gsc_df["CTR"].astype(str).str.replace("%", "", regex=False).str.replace(",", "").str.strip()
@@ -297,7 +296,6 @@ def _expected_ctr_for_pos(pos: float) -> float:
         return base
     return base * (9.0 / p) ** 0.5  # gentle decay beyond rank 9
 
-
 def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any]) -> List[str]:
     if df is None or df.empty:
         return ["No data available for analysis"]
@@ -313,24 +311,32 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any]) -> List[
         d["deficit_pct"] = np.where(d["expected_ctr"]>0, (d["expected_ctr"]-d["CTR"]) / d["expected_ctr"], np.nan)
         mask = (d["Position"] <= 10) & (d["deficit_pct"] >= (thresholds["ctr_deficit_pct"]/100.0)) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "deficit_pct").iterrows():
-            insights.append(f"""### ⚠️ Low CTR at Good Position\n**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}\n**Title:** {str(row.get('Title','Unknown'))[:90]}...\n**Recommendation:** Refresh title/meta, add rich snippets, and tighten intro to match dominant intent.""")
+            insights.append(f"""### ⚠️ Low CTR at Good Position
+**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+**Title:** {str(row.get('Title','Unknown'))[:90]}...
+**Recommendation:** Refresh title/meta, add rich snippets, and tighten intro to match dominant intent.""")
 
-    # Hidden gems: high CTR despite poor position
+    # Hidden gems
     if {"Position","CTR"}.issubset(d.columns):
         mask = (d["Position"] > 15) & (d["CTR"] > 0.05) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "CTR").iterrows():
-            insights.append(f"""### 💎 Hidden Gem (High CTR @ Poor Position)\n**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}\n**Title:** {str(row.get('Title','Unknown'))[:90]}...\n**Recommendation:** Strengthen internal links + on-page SEO to lift ranking; content already resonates.""")
+            insights.append(f"""### 💎 Hidden Gem (High CTR @ Poor Position)
+**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+**Title:** {str(row.get('Title','Unknown'))[:90]}...
+**Recommendation:** Strengthen internal links + on-page SEO to lift ranking; content already resonates.""")
 
-    # High bounce @ good position (needs GA4 bounceRate joined to Prod if available)
+    # High bounce
     if {"bounceRate","Position"}.issubset(d.columns):
         mask = (d["bounceRate"] > 0.70) & (d["Position"] <= 15) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "bounceRate").iterrows():
-            insights.append(f"""### 🚨 High Bounce at Good Position\n**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}\n**Title:** {str(row.get('Title','Unknown'))[:90]}...\n**Recommendation:** Re-check search intent, improve above-the-fold clarity, compress media, and add TOC anchors.""")
+            insights.append(f"""### 🚨 High Bounce at Good Position
+**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}
+**Title:** {str(row.get('Title','Unknown'))[:90]}...
+**Recommendation:** Re-check search intent, improve above-the-fold clarity, compress media, and add TOC anchors.""")
 
     if not insights:
         insights.append("No specific mismatches detected at current thresholds.")
     return insights
-
 
 def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.DataFrame:
     if df is None or df.empty:
@@ -373,40 +379,6 @@ def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.Dat
     ] if c in d.columns]
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"]) if not d.empty else pd.DataFrame()
 
-# ---- Sidebar: thresholds & dates ----
-# ---- Sidebar: thresholds & dates (moved AFTER data is ready) ----
-with st.sidebar:
-    st.subheader("Thresholds")
-    TH = CONFIG["thresholds"].copy()
-    TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1, key="ctr_def_pct")
-    TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50, key="min_impr")
-    # put this inside the same `with st.sidebar:` block
-use_ai = st.checkbox("Use AI-generated recommendations", value=False)
-provider = st.selectbox("LLM Provider", ["OpenAI", "Gemini"], index=0, disabled=not use_ai)
-max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
-
-
-    st.markdown("---")
-    st.subheader("Analysis Period")
-
-    if "date" in master_df.columns:
-        _dates = pd.to_datetime(master_df["date"], errors="coerce").dt.date.dropna()
-        _min_d, _max_d = _dates.min(), _dates.max()
-    else:
-        from datetime import date, timedelta
-        _max_d = date.today()
-        _min_d = _max_d - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
-
-    # Smart defaults: last N days, capped by CSV max date
-    _default_end = _max_d
-    _default_start = max(_min_d, _default_end - timedelta(days=CONFIG["defaults"]["date_lookback_days"]))
-
-    start_date = st.date_input("Start Date", value=_default_start, min_value=_min_d, max_value=_max_d, key="start_date_picker")
-    end_date   = st.date_input("End Date",   value=_default_end,   min_value=_min_d, max_value=_max_d, key="end_date_picker")
-    if start_date > end_date:
-        st.warning("Start date is after end date. Swapping.")
-        start_date, end_date = end_date, start_date
-
 # ---- Stepper ----
 st.markdown("### Onboarding & Data Ingestion")
 step = st.radio("Steps", [
@@ -417,7 +389,6 @@ step = st.radio("Steps", [
 ], horizontal=True)
 
 # Templates
-
 def _make_template_production():
     return pd.DataFrame({
         "Msid": [101, 102, 103],
@@ -535,6 +506,37 @@ if master_df is None or master_df.empty:
     st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
 
+# ---- Sidebar: thresholds & dates (AFTER data is ready) ----
+with st.sidebar:
+    st.subheader("Thresholds")
+    TH = CONFIG["thresholds"].copy()
+    TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1, key="ctr_def_pct")
+    TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50, key="min_impr")
+
+    # AI options
+    st.markdown("---")
+    st.subheader("AI Recommendations")
+    use_ai = st.checkbox("Use AI-generated recommendations", value=False)
+    provider = st.selectbox("LLM Provider", ["OpenAI", "Gemini"], index=0, disabled=not use_ai)
+    max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
+
+    st.markdown("---")
+    st.subheader("Analysis Period")
+    if "date" in master_df.columns:
+        _dates = pd.to_datetime(master_df["date"], errors="coerce").dt.date.dropna()
+        _min_d, _max_d = _dates.min(), _dates.max()
+    else:
+        _max_d = date.today()
+        _min_d = _max_d - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
+
+    _default_end = _max_d
+    _default_start = max(_min_d, _default_end - timedelta(days=CONFIG["defaults"]["date_lookback_days"]))
+    start_date = st.date_input("Start Date", value=_default_start, min_value=_min_d, max_value=_max_d, key="start_date_picker")
+    end_date   = st.date_input("End Date",   value=_default_end,   min_value=_min_d, max_value=_max_d, key="end_date_picker")
+    if start_date > end_date:
+        st.warning("Start date is after end date. Swapping.")
+        start_date, end_date = end_date, start_date
+
 # Date filter
 if "date" in master_df.columns:
     m = master_df.copy()
@@ -555,8 +557,6 @@ if step != "4) Analyze (Module 1)":
     st.stop()
 
 # ========== AI helpers ==========
-import os
-
 def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
     cols = [c for c in ["msid","Title","Query","L1_Category","L2_Category",
                         "Position","CTR","expected_ctr","Impressions","Clicks","bounceRate","Path"]
@@ -577,18 +577,15 @@ Rows (CSV):
 {csv_snippet}
 """
 
-def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> str | None:
-    # pick the rows that match this tag
+def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> Optional[str]:
     take = df[df["Mismatch_Tag"] == tag]
     if take.empty:
         return None
     csv_snippet = _format_rows_for_prompt(take, n=n)
     prompt = _make_prompt(tag, csv_snippet)
 
-    # try OpenAI or Gemini
     try:
         if provider == "OpenAI":
-            # prefer secrets; fallback to env
             api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
             if not api_key:
                 st.warning("OpenAI key missing. Add OPENAI_API_KEY to secrets or env.")
@@ -596,7 +593,7 @@ def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) ->
             from openai import OpenAI
             client = OpenAI(api_key=api_key)
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",  # small, fast, cheap; change if you like
+                model="gpt-4o-mini",
                 messages=[
                     {"role":"system","content":"Be a concise SEO optimizer."},
                     {"role":"user","content": prompt}
@@ -604,8 +601,7 @@ def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) ->
                 temperature=0.3
             )
             return resp.choices[0].message.content.strip()
-
-        else:  # Gemini
+        else:
             api_key = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
             if not api_key:
                 st.warning("Google key missing. Add GOOGLE_API_KEY to secrets or env.")
@@ -615,23 +611,24 @@ def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) ->
             model = genai.GenerativeModel("gemini-1.5-flash")
             resp = model.generate_content(prompt)
             return (resp.text or "").strip()
-
     except Exception as e:
         st.warning(f"AI recommendation failed ({provider}): {e}")
         return None
 # ========== /AI helpers ==========
-
 
 # -----------------------------
 # ANALYSIS — Module 1 outputs
 # -----------------------------
 st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 
+# 1) Build mismatch table first (needed by AI + visuals)
+mismatch_df = build_mismatch_table(filtered_df, TH)
+
+# 2) Build human-readable insight cards
 cards = engagement_mismatches(filtered_df, TH)
 
-# If user turned AI on and we have mismatch rows, ask the model per tag.
+# 3) AI recommendations per tag (if enabled), else fallback to canned cards
 if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
-    # Show sections per mismatch type, in a friendly order
     for tag in ["Low CTR @ Good Position",
                 "Hidden Gem: High CTR @ Poor Position",
                 "High Bounce @ Good Position"]:
@@ -641,17 +638,15 @@ if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Ta
             if txt:
                 st.markdown(txt)
             else:
-                # fallback: show the first canned card of this type
                 for c in cards:
                     if tag in c:
                         st.markdown(c)
                         break
 else:
-    # old behavior (no AI)
     for card in cards:
         st.markdown(card)
 
-mismatch_df = build_mismatch_table(filtered_df, TH)
+# 4) Show table + export
 if mismatch_df is not None and not mismatch_df.empty:
     st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
     with st.expander("Preview mismatch rows (first 200)", expanded=False):
@@ -660,7 +655,7 @@ if mismatch_df is not None and not mismatch_df.empty:
 else:
     st.info("No mismatch rows matched your thresholds and filters.")
 
-# ---- Visual: CTR vs Position bubble chart + expected CTR curve ----
+# 5) Visual: CTR vs Position bubble chart + expected CTR curve
 try:
     import plotly.express as px
     import plotly.graph_objects as go
@@ -670,10 +665,15 @@ try:
         if c in vis.columns:
             vis[c] = pd.to_numeric(vis[c], errors="coerce")
 
-    vis = vis.dropna(subset=["Position","CTR"])
+    # Attach tags (if available)
+    if mismatch_df is not None and not mismatch_df.empty:
+        key_cols = [c for c in ["msid","Query"] if c in vis.columns and c in mismatch_df.columns]
+        if key_cols:
+            vis = vis.merge(mismatch_df[key_cols + ["Mismatch_Tag"]].drop_duplicates(), on=key_cols, how="left")
     if "Mismatch_Tag" not in vis.columns:
         vis["Mismatch_Tag"] = None
 
+    vis = vis.dropna(subset=["Position","CTR"])
     fig = px.scatter(
         vis, x="Position", y="CTR",
         size="Impressions" if "Impressions" in vis.columns else None,
@@ -682,7 +682,6 @@ try:
         title="CTR vs Position (bubble = Impressions)"
     )
 
-    # Add expected CTR curve
     pos_grid = np.linspace(1, 50, 200)
     curve = [_expected_ctr_for_pos(p) for p in pos_grid]
     fig.add_trace(go.Scatter(x=pos_grid, y=curve, mode="lines", name="Expected CTR", hoverinfo="skip"))
@@ -690,11 +689,10 @@ try:
     fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
     st.plotly_chart(fig, use_container_width=True)
 
-except Exception as _e:
+except Exception:
     st.info("Install Plotly for charts: `pip install plotly`.")
 
-
-# Summary actions
+# 6) Summary actions
 st.divider()
 st.subheader("🎯 Quick Recommendations")
 if isinstance(cards, list) and len(cards) > 1:
@@ -706,5 +704,3 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
-
-
