@@ -380,6 +380,11 @@ with st.sidebar:
     TH = CONFIG["thresholds"].copy()
     TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1, key="ctr_def_pct")
     TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50, key="min_impr")
+    # put this inside the same `with st.sidebar:` block
+use_ai = st.checkbox("Use AI-generated recommendations", value=False)
+provider = st.selectbox("LLM Provider", ["OpenAI", "Gemini"], index=0, disabled=not use_ai)
+max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
+
 
     st.markdown("---")
     st.subheader("Analysis Period")
@@ -549,14 +554,102 @@ if step != "4) Analyze (Module 1)":
     st.info("Move to **Step 4** to run the Engagement vs Search analysis.")
     st.stop()
 
+# ========== AI helpers ==========
+import os
+
+def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
+    cols = [c for c in ["msid","Title","Query","L1_Category","L2_Category",
+                        "Position","CTR","expected_ctr","Impressions","Clicks","bounceRate","Path"]
+            if c in df.columns]
+    small = df[cols].head(n).copy()
+    if "CTR" in small.columns:
+        small["CTR"] = (small["CTR"]*100).round(2)
+    if "expected_ctr" in small.columns:
+        small["expected_ctr"] = (small["expected_ctr"]*100).round(2)
+    return small.to_csv(index=False)
+
+def _make_prompt(tag: str, csv_snippet: str) -> str:
+    return f"""
+You are an SEO growth analyst. Given rows flagged as '{tag}', write 3–5 specific, high-impact recommendations.
+Be concrete and article-ready (titles, meta patterns, internal link anchors, schema suggestions).
+Prioritize: quickest lift first. Keep items short (max 20 words each). Use bullets only.
+Rows (CSV):
+{csv_snippet}
+"""
+
+def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> str | None:
+    # pick the rows that match this tag
+    take = df[df["Mismatch_Tag"] == tag]
+    if take.empty:
+        return None
+    csv_snippet = _format_rows_for_prompt(take, n=n)
+    prompt = _make_prompt(tag, csv_snippet)
+
+    # try OpenAI or Gemini
+    try:
+        if provider == "OpenAI":
+            # prefer secrets; fallback to env
+            api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+            if not api_key:
+                st.warning("OpenAI key missing. Add OPENAI_API_KEY to secrets or env.")
+                return None
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",  # small, fast, cheap; change if you like
+                messages=[
+                    {"role":"system","content":"Be a concise SEO optimizer."},
+                    {"role":"user","content": prompt}
+                ],
+                temperature=0.3
+            )
+            return resp.choices[0].message.content.strip()
+
+        else:  # Gemini
+            api_key = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
+            if not api_key:
+                st.warning("Google key missing. Add GOOGLE_API_KEY to secrets or env.")
+                return None
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            resp = model.generate_content(prompt)
+            return (resp.text or "").strip()
+
+    except Exception as e:
+        st.warning(f"AI recommendation failed ({provider}): {e}")
+        return None
+# ========== /AI helpers ==========
+
+
 # -----------------------------
 # ANALYSIS — Module 1 outputs
 # -----------------------------
 st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 
 cards = engagement_mismatches(filtered_df, TH)
-for card in cards:
-    st.markdown(card)
+
+# If user turned AI on and we have mismatch rows, ask the model per tag.
+if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
+    # Show sections per mismatch type, in a friendly order
+    for tag in ["Low CTR @ Good Position",
+                "Hidden Gem: High CTR @ Poor Position",
+                "High Bounce @ Good Position"]:
+        if (mismatch_df["Mismatch_Tag"] == tag).any():
+            st.markdown(f"### {tag}")
+            txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai))
+            if txt:
+                st.markdown(txt)
+            else:
+                # fallback: show the first canned card of this type
+                for c in cards:
+                    if tag in c:
+                        st.markdown(c)
+                        break
+else:
+    # old behavior (no AI)
+    for card in cards:
+        st.markdown(card)
 
 mismatch_df = build_mismatch_table(filtered_df, TH)
 if mismatch_df is not None and not mismatch_df.empty:
@@ -613,4 +706,5 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
 
