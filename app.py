@@ -607,10 +607,17 @@ def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) ->
                 st.warning("Google key missing. Add GOOGLE_API_KEY to secrets or env.")
                 return None
             import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            resp = model.generate_content(prompt)
-            return (resp.text or "").strip()
+genai.configure(api_key=api_key)
+
+# OLD:
+# model = genai.GenerativeModel("gemini-1.5-flash")
+
+# NEW:
+model = genai.GenerativeModel("gemini-2.5-flash")  # or: "gemini-2.5-flash-lite"
+
+resp = model.generate_content(prompt)
+return (resp.text or "").strip()
+
     except Exception as e:
         st.warning(f"AI recommendation failed ({provider}): {e}")
         return None
@@ -704,3 +711,4 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
