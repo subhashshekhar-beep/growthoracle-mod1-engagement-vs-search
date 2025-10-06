@@ -382,14 +382,27 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Analysis Period")
+   # Calculate actual date range from data
+if gsc_df_raw is not None and not gsc_df_raw.empty:
+    date_col = gsc_map.get("date")
+    if date_col and date_col in gsc_df_raw.columns:
+        temp_dates = pd.to_datetime(gsc_df_raw[date_col], errors="coerce").dt.date
+        data_min = temp_dates.min()
+        data_max = temp_dates.max()
+        
+        start_date = st.date_input("Start Date", value=data_min, min_value=data_min, max_value=data_max)
+        end_date = st.date_input("End Date", value=data_max, min_value=data_min, max_value=data_max)
+    else:
+        # Fallback to default
+        end = date.today()
+        start = end - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
+        start_date = st.date_input("Start Date", value=start)
+        end_date = st.date_input("End Date", value=end)
+else:
     end = date.today()
     start = end - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
     start_date = st.date_input("Start Date", value=start)
     end_date = st.date_input("End Date", value=end)
-    if start_date > end_date:
-        st.warning("Start date is after end date. Swapping.")
-        start_date, end_date = end_date, start_date
-
 # ---- Stepper ----
 st.markdown("### Onboarding & Data Ingestion")
 step = st.radio("Steps", [
@@ -567,3 +580,4 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
