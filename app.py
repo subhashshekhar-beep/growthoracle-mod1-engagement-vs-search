@@ -147,44 +147,6 @@ def coerce_numeric(series, name: str, vc: ValidationCollector, clamp: Optional[T
         s = s.clip(lower=lo, upper=hi) if hi is not None else s.clip(lower=lo)
     return s
 
-# Add this to your code structure:
-
-def llm_enhanced_recommendations(mismatch_df, top_n=10):
-    """
-    Use Claude API (via the fetch capability you have in artifacts)
-    to generate context-aware recommendations
-    """
-    insights = []
-    
-    # Only analyze top mismatches to control costs
-    priority_rows = mismatch_df.nlargest(top_n, 'ctr_deficit')
-    
-    for idx, row in priority_rows.iterrows():
-        prompt = f"""Analyze this SEO mismatch and provide specific, actionable recommendations:
-
-**Page Details:**
-- Title: {row['Title']}
-- Current Position: {row['Position']:.1f}
-- CTR: {row['CTR']:.2%} (Expected: {row['expected_ctr']:.2%})
-- Top Query: {row['Query']}
-- Category: {row['L1_Category']} > {row['L2_Category']}
-- Bounce Rate: {row.get('bounceRate', 'N/A')}
-
-**Context:**
-{row['Mismatch_Tag']}
-
-Provide 3-5 specific, actionable recommendations to improve this page's performance. Focus on:
-1. Title/meta optimization for the query intent
-2. Content structure improvements
-3. Technical SEO fixes
-4. User experience enhancements
-
-Keep each recommendation under 30 words."""
-
-        # Call Claude API (using Anthropic endpoint from your system)
-        # This would be implemented in the Streamlit app
-        
-    return insights
 # ---- CSV Readers ----
 def read_csv_safely(upload, name: str, vc: ValidationCollector) -> Optional[pd.DataFrame]:
     if upload is None:
@@ -420,27 +382,14 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Analysis Period")
-   # Calculate actual date range from data
-if gsc_df_raw is not None and not gsc_df_raw.empty:
-    date_col = gsc_map.get("date")
-    if date_col and date_col in gsc_df_raw.columns:
-        temp_dates = pd.to_datetime(gsc_df_raw[date_col], errors="coerce").dt.date
-        data_min = temp_dates.min()
-        data_max = temp_dates.max()
-        
-        start_date = st.date_input("Start Date", value=data_min, min_value=data_min, max_value=data_max)
-        end_date = st.date_input("End Date", value=data_max, min_value=data_min, max_value=data_max)
-    else:
-        # Fallback to default
-        end = date.today()
-        start = end - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
-        start_date = st.date_input("Start Date", value=start)
-        end_date = st.date_input("End Date", value=end)
-else:
     end = date.today()
     start = end - timedelta(days=CONFIG["defaults"]["date_lookback_days"])
     start_date = st.date_input("Start Date", value=start)
     end_date = st.date_input("End Date", value=end)
+    if start_date > end_date:
+        st.warning("Start date is after end date. Swapping.")
+        start_date, end_date = end_date, start_date
+
 # ---- Stepper ----
 st.markdown("### Onboarding & Data Ingestion")
 step = st.radio("Steps", [
@@ -593,12 +542,9 @@ if step != "4) Analyze (Module 1)":
 # -----------------------------
 st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 
-# NEW CODE (from artifact above):
-use_ai = st.checkbox(...)
-if use_ai:
-    # Enhanced LLM mode
-else:
-    # Original rule-based mode
+cards = engagement_mismatches(filtered_df, TH)
+for card in cards:
+    st.markdown(card)
 
 mismatch_df = build_mismatch_table(filtered_df, TH)
 if mismatch_df is not None and not mismatch_df.empty:
@@ -621,5 +567,3 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
-
-
