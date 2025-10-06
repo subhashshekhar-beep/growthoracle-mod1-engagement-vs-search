@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-sentence-transformers
+pyyaml
 plotly
-statsmodels
-PyYAML
-scikit-learn
+google-generativeai
+openai
