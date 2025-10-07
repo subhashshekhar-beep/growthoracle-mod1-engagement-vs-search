@@ -1,9 +1,6 @@
-# Streamlit app — GrowthOracle (Module 1 only)
-# Engagement vs Search Performance Mismatch — Standalone Project
-# --------------------------------------------------------------
-# How to run:
-#   pip install streamlit pandas numpy plotly statsmodels pyyaml
-#   streamlit run app.py
+# app.py — GrowthOracle (Module 1 only)
+# How to run on Streamlit Cloud: push repo + set Secrets in Cloud UI
+# Required packages: streamlit pandas numpy pyyaml plotly openai google-genai (or google-generativeai)
 
 import os, re, sys, json, logging
 from dataclasses import dataclass, field
@@ -14,11 +11,42 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Optional deps
+# --- Optional YAML ---
 try:
     import yaml
 except Exception:
     yaml = None
+
+# --- Try AI SDKs (we'll feature-detect later) ---
+_HAS_OPENAI_CLIENT = False
+_HAS_OPENAI = False
+try:
+    from openai import OpenAI  # modern SDK
+    _HAS_OPENAI_CLIENT = True
+    _HAS_OPENAI = True
+except Exception:
+    try:
+        import openai  # legacy import if needed later
+        _HAS_OPENAI = True
+    except Exception:
+        pass
+
+_HAS_GOOGLE_GENAI_NEW = False  # google-genai (new SDK)
+_HAS_GOOGLE_GENAI_OLD = False  # google-generativeai (legacy)
+
+try:
+    from google import genai as _genai_new     # new SDK
+    from google.genai import types as _genai_types
+    _HAS_GOOGLE_GENAI_NEW = True
+except Exception:
+    pass
+
+if not _HAS_GOOGLE_GENAI_NEW:
+    try:
+        import google.generativeai as _genai_old  # legacy SDK
+        _HAS_GOOGLE_GENAI_OLD = True
+    except Exception:
+        pass
 
 # ---- Page ----
 st.set_page_config(
@@ -379,7 +407,138 @@ def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.Dat
     ] if c in d.columns]
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"]) if not d.empty else pd.DataFrame()
 
-# ---- Stepper ----
+# ---------- AI helpers ----------
+def _get_secret(key: str, sections=("google","gemini","general")) -> Optional[str]:
+    """Read secret from Streamlit Cloud Secrets UI (or env)."""
+    try:
+        if key in st.secrets and st.secrets[key]:
+            return st.secrets[key]
+    except Exception:
+        pass
+    try:
+        for sect in sections:
+            if sect in st.secrets:
+                sec = st.secrets[sect]
+                for k in (key, "API_KEY", "api_key", "key"):
+                    if isinstance(sec, dict) and sec.get(k):
+                        return sec[k]
+    except Exception:
+        pass
+    return os.getenv(key)
+
+def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
+    cols = [c for c in ["msid","Title","Query","L1_Category","L2_Category",
+                        "Position","CTR","expected_ctr","Impressions","Clicks","bounceRate","Path"]
+            if c in df.columns]
+    small = df[cols].head(n).copy()
+    if "CTR" in small.columns:
+        small["CTR"] = (small["CTR"]*100).round(2)
+    if "expected_ctr" in small.columns:
+        small["expected_ctr"] = (small["expected_ctr"]*100).round(2)
+    return small.to_csv(index=False)
+
+def _make_prompt(tag: str, csv_snippet: str) -> str:
+    return f"""
+You are an SEO growth analyst. Given rows flagged as '{tag}', write 3–5 specific, high-impact recommendations.
+Be concrete and article-ready (titles, meta patterns, internal link anchors, schema suggestions).
+Prioritize: quickest lift first. Keep items short (max 20 words each). Use bullets only.
+Rows (CSV):
+{csv_snippet}
+"""
+
+def _gemini_generate(prompt: str) -> Optional[str]:
+    # Prefer new SDK (google-genai) with stable v1, else fall back to legacy (google-generativeai)
+    api_key = _get_secret("GOOGLE_API_KEY")
+    if not api_key:
+        st.warning("Google key missing. Set GOOGLE_API_KEY in Streamlit Cloud → Settings → Secrets.")
+        return None
+
+    # New SDK path
+    if _HAS_GOOGLE_GENAI_NEW:
+        try:
+            client = _genai_new.Client(
+                api_key=api_key,
+                http_options=_genai_types.HttpOptions(api_version="v1"),
+            )
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",  # fast, current
+                contents=prompt,
+            )
+            text = getattr(resp, "text", None)
+            if not text and hasattr(resp, "candidates"):
+                # very defensive fallback
+                text = "\n".join([getattr(c, "text", "") for c in resp.candidates if getattr(c, "text", "")])
+            return (text or "").strip() or None
+        except Exception as e:
+            st.warning(f"Gemini (google-genai) failed: {e}")
+
+    # Legacy SDK path (works if installed)
+    if _HAS_GOOGLE_GENAI_OLD:
+        try:
+            _genai_old.configure(api_key=api_key)
+            model = _genai_old.GenerativeModel("gemini-2.5-flash")
+            resp = model.generate_content(prompt)
+            return (getattr(resp, "text", "") or "").strip() or None
+        except Exception as e:
+            st.warning(f"Gemini (google-generativeai) failed: {e}")
+
+    st.warning("Gemini SDK not installed. Add 'google-genai' or 'google-generativeai' to requirements.txt.")
+    return None
+
+def _openai_generate(prompt: str) -> Optional[str]:
+    api_key = _get_secret("OPENAI_API_KEY")
+    if not api_key:
+        st.warning("OpenAI key missing. Set OPENAI_API_KEY in Streamlit Cloud → Settings → Secrets.")
+        return None
+
+    # Modern SDK path
+    if _HAS_OPENAI_CLIENT:
+        try:
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role":"system","content":"Be a concise SEO optimizer."},
+                    {"role":"user","content": prompt}
+                ],
+                temperature=0.3
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            st.warning(f"OpenAI (new SDK) failed: {e}")
+
+    # Legacy fallback (if available)
+    if _HAS_OPENAI and not _HAS_OPENAI_CLIENT:
+        try:
+            import openai
+            openai.api_key = api_key
+            resp = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role":"system","content":"Be a concise SEO optimizer."},
+                    {"role":"user","content": prompt}
+                ],
+                temperature=0.3
+            )
+            return (resp["choices"][0]["message"]["content"] or "").strip()
+        except Exception as e:
+            st.warning(f"OpenAI (legacy) failed: {e}")
+
+    st.warning("OpenAI SDK not installed. Add 'openai' to requirements.txt.")
+    return None
+
+def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> Optional[str]:
+    take = df[df["Mismatch_Tag"] == tag]
+    if take.empty:
+        return None
+    csv_snippet = _format_rows_for_prompt(take, n=n)
+    prompt = _make_prompt(tag, csv_snippet)
+    if provider == "Gemini":
+        return _gemini_generate(prompt)
+    else:
+        return _openai_generate(prompt)
+
+# ---------- UI stepper ----------
 st.markdown("### Onboarding & Data Ingestion")
 step = st.radio("Steps", [
     "1) Get CSV Templates",
@@ -506,16 +665,23 @@ if master_df is None or master_df.empty:
     st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
 
-# ---- Sidebar: thresholds & dates (AFTER data is ready) ----
+# ---- Sidebar: thresholds, AI toggles, date range (AFTER data is ready) ----
 with st.sidebar:
     st.subheader("Thresholds")
     TH = CONFIG["thresholds"].copy()
     TH["ctr_deficit_pct"] = st.slider("CTR Deficit Threshold (%)", 0.5, 10.0, float(TH["ctr_deficit_pct"]), step=0.1, key="ctr_def_pct")
     TH["min_impressions"] = st.number_input("Min Impressions (to consider)", min_value=0, value=int(TH["min_impressions"]), step=50, key="min_impr")
 
-    # AI options
     st.markdown("---")
     st.subheader("AI Recommendations")
+    ai_note = []
+    if not (_HAS_GOOGLE_GENAI_NEW or _HAS_GOOGLE_GENAI_OLD):
+        ai_note.append("Gemini SDK missing")
+    if not _HAS_OPENAI:
+        ai_note.append("OpenAI SDK missing")
+    if ai_note:
+        st.caption("• " + " • ".join(ai_note) + " — check requirements.txt")
+
     use_ai = st.checkbox("Use AI-generated recommendations", value=False)
     provider = st.selectbox("LLM Provider", ["OpenAI", "Gemini"], index=0, disabled=not use_ai)
     max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
@@ -552,163 +718,99 @@ else:
 
 st.success(f"✅ Master dataset ready: {filtered_df.shape[0]:,} rows × {filtered_df.shape[1]} columns")
 
-if step != "4) Analyze (Module 1)":
-    st.info("Move to **Step 4** to run the Engagement vs Search analysis.")
-    st.stop()
+if st.session_state.get("Steps") == "4) Analyze (Module 1)":
+    pass  # just in case, but we don't rely on this key
 
-# ========== AI helpers ==========
-def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
-    cols = [c for c in ["msid","Title","Query","L1_Category","L2_Category",
-                        "Position","CTR","expected_ctr","Impressions","Clicks","bounceRate","Path"]
-            if c in df.columns]
-    small = df[cols].head(n).copy()
-    if "CTR" in small.columns:
-        small["CTR"] = (small["CTR"]*100).round(2)
-    if "expected_ctr" in small.columns:
-        small["expected_ctr"] = (small["expected_ctr"]*100).round(2)
-    return small.to_csv(index=False)
+# Move on only if user chose step 4
+if st.session_state.get("radio") if "radio" in st.session_state else True:
+    # We already enforce step flow with st.stop() earlier.
 
-def _make_prompt(tag: str, csv_snippet: str) -> str:
-    return f"""
-You are an SEO growth analyst. Given rows flagged as '{tag}', write 3–5 specific, high-impact recommendations.
-Be concrete and article-ready (titles, meta patterns, internal link anchors, schema suggestions).
-Prioritize: quickest lift first. Keep items short (max 20 words each). Use bullets only.
-Rows (CSV):
-{csv_snippet}
-"""
+    # -----------------------------
+    # ANALYSIS — Module 1 outputs
+    # -----------------------------
+    st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 
-def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> Optional[str]:
-    take = df[df["Mismatch_Tag"] == tag]
-    if take.empty:
-        return None
-    csv_snippet = _format_rows_for_prompt(take, n=n)
-    prompt = _make_prompt(tag, csv_snippet)
+    # 1) Build mismatch table first
+    mismatch_df = build_mismatch_table(filtered_df, TH)
 
-    try:
-        if provider == "OpenAI":
-            api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
-            if not api_key:
-                st.warning("OpenAI key missing. Add OPENAI_API_KEY to secrets or env.")
-                return None
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role":"system","content":"Be a concise SEO optimizer."},
-                    {"role":"user","content": prompt}
-                ],
-                temperature=0.3
-            )
-            return resp.choices[0].message.content.strip()
-        else:
-            api_key = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
-            if not api_key:
-                st.warning("Google key missing. Add GOOGLE_API_KEY to secrets or env.")
-                return None
-            import google.generativeai as genai
-genai.configure(api_key=api_key)
+    # 2) Build human-readable insight cards
+    cards = engagement_mismatches(filtered_df, TH)
 
-# OLD:
-# model = genai.GenerativeModel("gemini-1.5-flash")
+    # 3) AI recommendations per tag (if enabled), else fallback to canned cards
+    if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
+        for tag in ["Low CTR @ Good Position",
+                    "Hidden Gem: High CTR @ Poor Position",
+                    "High Bounce @ Good Position"]:
+            if (mismatch_df["Mismatch_Tag"] == tag).any():
+                st.markdown(f"### {tag}")
+                txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai))
+                if txt:
+                    st.markdown(txt)
+                else:
+                    # fallback to a canned card of same type
+                    for c in cards:
+                        if tag in c:
+                            st.markdown(c)
+                            break
+    else:
+        for card in cards:
+            st.markdown(card)
 
-# NEW:
-model = genai.GenerativeModel("gemini-2.5-flash")  # or: "gemini-2.5-flash-lite"
-
-resp = model.generate_content(prompt)
-return (resp.text or "").strip()
-
-    except Exception as e:
-        st.warning(f"AI recommendation failed ({provider}): {e}")
-        return None
-# ========== /AI helpers ==========
-
-# -----------------------------
-# ANALYSIS — Module 1 outputs
-# -----------------------------
-st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
-
-# 1) Build mismatch table first (needed by AI + visuals)
-mismatch_df = build_mismatch_table(filtered_df, TH)
-
-# 2) Build human-readable insight cards
-cards = engagement_mismatches(filtered_df, TH)
-
-# 3) AI recommendations per tag (if enabled), else fallback to canned cards
-if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
-    for tag in ["Low CTR @ Good Position",
-                "Hidden Gem: High CTR @ Poor Position",
-                "High Bounce @ Good Position"]:
-        if (mismatch_df["Mismatch_Tag"] == tag).any():
-            st.markdown(f"### {tag}")
-            txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai))
-            if txt:
-                st.markdown(txt)
-            else:
-                for c in cards:
-                    if tag in c:
-                        st.markdown(c)
-                        break
-else:
-    for card in cards:
-        st.markdown(card)
-
-# 4) Show table + export
-if mismatch_df is not None and not mismatch_df.empty:
-    st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
-    with st.expander("Preview mismatch rows (first 200)", expanded=False):
-        st.dataframe(mismatch_df.head(200), use_container_width=True, hide_index=True)
-    download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
-else:
-    st.info("No mismatch rows matched your thresholds and filters.")
-
-# 5) Visual: CTR vs Position bubble chart + expected CTR curve
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-
-    vis = filtered_df.copy()
-    for c in ["Position","CTR","Impressions"]:
-        if c in vis.columns:
-            vis[c] = pd.to_numeric(vis[c], errors="coerce")
-
-    # Attach tags (if available)
+    # 4) Show table + export
     if mismatch_df is not None and not mismatch_df.empty:
-        key_cols = [c for c in ["msid","Query"] if c in vis.columns and c in mismatch_df.columns]
-        if key_cols:
-            vis = vis.merge(mismatch_df[key_cols + ["Mismatch_Tag"]].drop_duplicates(), on=key_cols, how="left")
-    if "Mismatch_Tag" not in vis.columns:
-        vis["Mismatch_Tag"] = None
+        st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
+        with st.expander("Preview mismatch rows (first 200)", expanded=False):
+            st.dataframe(mismatch_df.head(200), use_container_width=True, hide_index=True)
+        download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
+    else:
+        st.info("No mismatch rows matched your thresholds and filters.")
 
-    vis = vis.dropna(subset=["Position","CTR"])
-    fig = px.scatter(
-        vis, x="Position", y="CTR",
-        size="Impressions" if "Impressions" in vis.columns else None,
-        color="Mismatch_Tag",
-        hover_data=[c for c in ["msid","Title","Query","L1_Category","L2_Category","Impressions","Clicks"] if c in vis.columns],
-        title="CTR vs Position (bubble = Impressions)"
-    )
+    # 5) Visual: CTR vs Position bubble chart + expected CTR curve
+    try:
+        import plotly.express as px
+        import plotly.graph_objects as go
 
-    pos_grid = np.linspace(1, 50, 200)
-    curve = [_expected_ctr_for_pos(p) for p in pos_grid]
-    fig.add_trace(go.Scatter(x=pos_grid, y=curve, mode="lines", name="Expected CTR", hoverinfo="skip"))
+        vis = filtered_df.copy()
+        for c in ["Position","CTR","Impressions"]:
+            if c in vis.columns:
+                vis[c] = pd.to_numeric(vis[c], errors="coerce")
 
-    fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
-    st.plotly_chart(fig, use_container_width=True)
+        # Attach tags (if available) for coloring
+        if mismatch_df is not None and not mismatch_df.empty:
+            key_cols = [c for c in ["msid","Query"] if c in vis.columns and c in mismatch_df.columns]
+            if key_cols:
+                vis = vis.merge(mismatch_df[key_cols + ["Mismatch_Tag"]].drop_duplicates(), on=key_cols, how="left")
+        if "Mismatch_Tag" not in vis.columns:
+            vis["Mismatch_Tag"] = None
 
-except Exception:
-    st.info("Install Plotly for charts: `pip install plotly`.")
+        vis = vis.dropna(subset=["Position","CTR"])
+        fig = px.scatter(
+            vis, x="Position", y="CTR",
+            size="Impressions" if "Impressions" in vis.columns else None,
+            color="Mismatch_Tag",
+            hover_data=[c for c in ["msid","Title","Query","L1_Category","L2_Category","Impressions","Clicks"] if c in vis.columns],
+            title="CTR vs Position (bubble = Impressions)"
+        )
 
-# 6) Summary actions
-st.divider()
-st.subheader("🎯 Quick Recommendations")
-if isinstance(cards, list) and len(cards) > 1:
-    st.success("**Priority Actions:**")
-    for card in cards[:3]:
-        st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}")
-else:
-    st.info("Upload more data or tune thresholds to surface actions.")
+        pos_grid = np.linspace(1, 50, 200)
+        curve = [_expected_ctr_for_pos(p) for p in pos_grid]
+        fig.add_trace(go.Scatter(x=pos_grid, y=curve, mode="lines", name="Expected CTR", hoverinfo="skip"))
+
+        fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
+        st.plotly_chart(fig, use_container_width=True)
+
+    except Exception:
+        st.info("Install Plotly for charts: `pip install plotly`.")
+
+    # 6) Summary actions
+    st.divider()
+    st.subheader("🎯 Quick Recommendations")
+    if isinstance(cards, list) and len(cards) > 1:
+        st.success("**Priority Actions:**")
+        for card in cards[:3]:
+            st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}")
+    else:
+        st.info("Upload more data or tune thresholds to surface actions.")
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
-
