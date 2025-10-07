@@ -863,7 +863,7 @@ if mismatch_df is not None and not mismatch_df.empty:
     download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
 else:
     st.info("No mismatch rows matched your thresholds and filters.")
-
+    
 # 5) Visual: CTR vs Position bubble chart + expected CTR curve (with clear errors)
 try:
     import plotly.express as px
@@ -873,7 +873,9 @@ except Exception as e:
 else:
     try:
         vis = filtered_df.copy()
-        for c in ["Position","CTR","Impressions"]:
+
+        # Ensure numeric
+        for c in ["Position", "CTR", "Impressions"]:
             if c in vis.columns:
                 vis[c] = pd.to_numeric(vis[c], errors="coerce")
 
@@ -881,25 +883,44 @@ else:
         if mismatch_df is not None and not mismatch_df.empty:
             key_cols = [c for c in ["msid","Query"] if c in vis.columns and c in mismatch_df.columns]
             if key_cols:
-                vis = vis.merge(mismatch_df[key_cols + ["Mismatch_Tag"]].drop_duplicates(), on=key_cols, how="left")
+                vis = vis.merge(
+                    mismatch_df[key_cols + ["Mismatch_Tag"]].drop_duplicates(),
+                    on=key_cols,
+                    how="left"
+                )
         if "Mismatch_Tag" not in vis.columns:
             vis["Mismatch_Tag"] = None
 
-        vis = vis.dropna(subset=["Position","CTR"])
+        # Drop rows missing x/y
+        vis = vis.dropna(subset=["Position", "CTR"])
+
+        # Decide whether to size by Impressions
+        size_col = None
+        if "Impressions" in vis.columns:
+            # If at least one non-NaN, use it. Fill NaNs with 0 and clip negatives.
+            if vis["Impressions"].notna().any():
+                vis["Impressions"] = vis["Impressions"].fillna(0).clip(lower=0)
+                # If everything became 0, it's still valid; bubbles will be small.
+                size_col = "Impressions"
+
         fig = px.scatter(
-            vis, x="Position", y="CTR",
-            size="Impressions" if "Impressions" in vis.columns else None,
+            vis,
+            x="Position",
+            y="CTR",
+            size=size_col,  # None if no valid sizes
             color="Mismatch_Tag",
             hover_data=[c for c in ["msid","Title","Query","L1_Category","L2_Category","Impressions","Clicks"] if c in vis.columns],
-            title="CTR vs Position (bubble = Impressions)"
+            title="CTR vs Position (bubble = Impressions)" if size_col else "CTR vs Position"
         )
 
+        # Expected CTR curve
         pos_grid = np.linspace(1, 50, 200)
         curve = [_expected_ctr_for_pos(p) for p in pos_grid]
         fig.add_trace(go.Scatter(x=pos_grid, y=curve, mode="lines", name="Expected CTR", hoverinfo="skip"))
 
         fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
         st.plotly_chart(fig, use_container_width=True)
+
     except Exception as e:
         st.error("Chart failed. See error below:")
         st.exception(e)
@@ -916,4 +937,5 @@ else:
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
 
