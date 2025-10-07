@@ -1,8 +1,8 @@
-streamlit
-pandas
-numpy
+streamlit>=1.38
+pandas>=2.2
+numpy>=1.26
 pyyaml
-plotly
-google-generativeai>=0.8.5
-openai
-
+plotly>=5.24.1
+openai>=1.51.0
+google-genai>=1.41.0
+# (optional legacy) google-generativeai>=0.8.5
