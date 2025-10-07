@@ -136,7 +136,6 @@ class ValidationCollector:
             "context": json.dumps(m.context, ensure_ascii=False)
         } for m in self.messages])
 
-
 # ---- UI helpers ----
 def download_df_button(df: pd.DataFrame, filename: str, label: str):
     if df is None or df.empty:
@@ -336,7 +335,6 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
 
     return merged, vc
 
-
 # ---- Module 1 logic ----
 EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
 
@@ -348,7 +346,7 @@ def _expected_ctr_for_pos(pos: float) -> float:
         return base
     return base * (9.0 / p) ** 0.5  # gentle decay beyond rank 9
 
-# Editor-friendly fallback bullets (English only)
+# Editor-simple fallback (short)
 def _simple_actionlines(tag: str, row: Dict[str, Any]) -> List[str]:
     templates = {
         "Low CTR @ Good Position": [
@@ -372,7 +370,111 @@ def _simple_actionlines(tag: str, row: Dict[str, Any]) -> List[str]:
     }
     return templates.get(tag, ["Make small, clear edits to title, intro, links, and summary."])
 
-def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_mode: bool = False) -> List[str]:
+# SEO + Business fallback (what/where/why — structured)
+def _biz_card(tag: str, row: Dict[str, Any]) -> str:
+    base = {
+        "Low CTR @ Good Position": {
+            "goal": "Lift clicks without changing rank.",
+            "target": "Improve click rate toward 15–25% at positions 1–10.",
+            "what": [
+                "**SEO Title (meta title):** Lead with main keyword + clear benefit.",
+                "**H1 (headline):** Match title promise; remove fluff/brand-first leads.",
+                "**Meta description:** 1–2 lines answering 'What will I get?' + soft CTA.",
+                "**Intro/dek:** State the core answer/value in first 2–3 lines.",
+                "**FAQ (2–4):** Cover top 'People also ask' topics."
+            ],
+            "where": [
+                "CMS → Meta Title, H1, Meta Description, Dek/Intro, FAQ module.",
+                "Listing/cards that link here → card title/teaser (if owned)."
+            ],
+            "why": [
+                "Users pick the clearest promise on page-1; copy must signal value fast.",
+                "Matching intent + quick answers drives higher click-through."
+            ],
+            "serp": [
+                "Add **FAQPage** or **NewsArticle/Article** schema.",
+                "Place concise bullets near the top (often pulled into snippets)."
+            ],
+            "internal": [
+                "Add 3–5 links from high-traffic, closely related pages.",
+                "Use exact/topic-match anchors (not 'read more')."
+            ],
+            "measure": "Track CTR & impressions per query for 7–14 days."
+        },
+        "Hidden Gem: High CTR @ Poor Position": {
+            "goal": "Move a proven hit up the ranks.",
+            "target": "Improve position from 16–40 → top 10 while keeping strong click rate.",
+            "what": [
+                "**Topical depth:** Add H2/H3 sections for related questions/entities.",
+                "**Intro & summary:** Add a 'What you’ll learn/see' box.",
+                "**E-E-A-T:** Bylines, sources, dates, expert quotes where relevant."
+            ],
+            "where": [
+                "CMS → H2/H3 structure, intro/summary box, citations/sources.",
+                "Other pages → add internal links pointing here."
+            ],
+            "why": [
+                "High CTR proves fit; ranking lags due to coverage & internal authority gaps."
+            ],
+            "serp": [
+                "Add/verify **Article/NewsArticle** schema (headline, date, author, image).",
+                "Check canonical and avoid index bloat."
+            ],
+            "internal": [
+                "Link from 5–10 related, strong pages **above the fold** or near first mention.",
+                "Anchors reflect the exact subtopic (e.g., 'IPL 2025 squads')."
+            ],
+            "measure": "Track average position & impressions weekly for 2–4 weeks."
+        },
+        "High Bounce @ Good Position": {
+            "goal": "Keep qualified traffic; protect revenue/rankings.",
+            "target": "Reduce bounce from >70% → <55%.",
+            "what": [
+                "**Above-the-fold:** Put the key answer/table/summary in first screen.",
+                "**Structure:** Short paragraphs; bullets; early TL;DR box.",
+                "**Media:** Compress images; remove autoplay video above the fold."
+            ],
+            "where": [
+                "CMS → Dek/intro, first H2, TL;DR box, image settings.",
+                "Template (if available) → move heavy embeds below the fold."
+            ],
+            "why": [
+                "Search visitors leave when the first screen doesn’t deliver or loads slow."
+            ],
+            "serp": [
+                "Keep headings scannable; align early copy with query intent."
+            ],
+            "internal": [
+                "Link onward to deeper pages after the answer (reduce pogo-sticking)."
+            ],
+            "measure": "Watch bounce, engagement time, and scroll depth for 7–14 days."
+        }
+    }
+    b = base.get(tag, None)
+    if not b:
+        return "- Make clear, measurable changes to title, intro, structure, and internal links."
+    lines = []
+    lines.append(f"**Goal (business):** {b['goal']}")
+    lines.append(f"**Target:** {b['target']}")
+    lines.append("\n**What to change (exact fields)**")
+    lines += [f"- {w}" for w in b["what"]]
+    lines.append("\n**Where to change**")
+    lines += [f"- {w}" for w in b["where"]]
+    lines.append("\n**Why**")
+    lines += [f"- {w}" for w in b["why"]]
+    if b.get("serp"):
+        lines.append("\n**SERP enhancements**")
+        lines += [f"- {w}" for w in b["serp"]]
+    if b.get("internal"):
+        lines.append("\n**Internal links (quick wins)**")
+        lines += [f"- {w}" for w in b["internal"]]
+    lines.append(f"\n**How to measure**\n- {b['measure']}")
+    return "\n".join(lines)
+
+def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], style: str = "biz") -> List[str]:
+    """
+    style: 'simple' | 'biz' | 'technical'
+    """
     if df is None or df.empty:
         return ["No data available for analysis"]
     d = df.copy()
@@ -390,7 +492,7 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_m
             msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
             title_txt = str(row.get('Title') or '').strip() or "(title missing)"
             show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
-            if simple_mode:
+            if style == "simple":
                 steps = _simple_actionlines("Low CTR @ Good Position", row)
                 bullet = "\n".join([f"- {s}" for s in steps])
                 insights.append(
@@ -398,7 +500,12 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_m
                     f"{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n"
                     f"{show_title}\n{bullet}"
                 )
-            else:
+            elif style == "biz":
+                body = _biz_card("Low CTR @ Good Position", row)
+                insights.append(
+                    f"### ⚠️ Low clicks at good rank\n{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n{show_title}\n\n{body}"
+                )
+            else:  # technical
                 insights.append(
                     f"""### ⚠️ Low CTR at Good Position
 {msid_txt} | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
@@ -413,13 +520,18 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_m
             msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
             title_txt = str(row.get('Title') or '').strip() or "(title missing)"
             show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
-            if simple_mode:
+            if style == "simple":
                 steps = _simple_actionlines("Hidden Gem: High CTR @ Poor Position", row)
                 bullet = "\n".join([f"- {s}" for s in steps])
                 insights.append(
-                    f"### 💎 Hidden Gem (people like it, but rank is low)\n"
+                    f"### 💎 Hidden gem (people like it, but rank is low)\n"
                     f"{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n"
                     f"{show_title}\n{bullet}"
+                )
+            elif style == "biz":
+                body = _biz_card("Hidden Gem: High CTR @ Poor Position", row)
+                insights.append(
+                    f"### 💎 Hidden gem (high clicks, low rank)\n{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n{show_title}\n\n{body}"
                 )
             else:
                 insights.append(
@@ -436,13 +548,18 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_m
             msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
             title_txt = str(row.get('Title') or '').strip() or "(title missing)"
             show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
-            if simple_mode:
+            if style == "simple":
                 steps = _simple_actionlines("High Bounce @ Good Position", row)
                 bullet = "\n".join([f"- {s}" for s in steps])
                 insights.append(
                     f"### 🚨 People leave quickly even though rank is good\n"
                     f"{msid_txt} | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}\n"
                     f"{show_title}\n{bullet}"
+                )
+            elif style == "biz":
+                body = _biz_card("High Bounce @ Good Position", row)
+                insights.append(
+                    f"### 🚨 High bounce at good rank\n{msid_txt} | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}\n{show_title}\n\n{body}"
                 )
             else:
                 insights.append(
@@ -497,8 +614,6 @@ def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.Dat
     ] if c in d.columns]
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"]) if not d.empty else pd.DataFrame()
 
-
-
 # ---------- AI helpers ----------
 def _get_secret(key: str, sections=("google","gemini","general")) -> Optional[str]:
     try:
@@ -528,19 +643,42 @@ def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
         small["expected_ctr"] = (small["expected_ctr"]*100).round(2)
     return small.to_csv(index=False)
 
-def _make_prompt(tag: str, csv_snippet: str, simple_mode: bool) -> str:
-    if simple_mode:
+def _make_prompt(tag: str, csv_snippet: str, style: str) -> str:
+    """
+    style: 'simple' | 'biz' | 'technical'
+    """
+    if style == "simple":
         tone = (
             "Audience: newsroom content editors (non-technical).\n"
-            "Style: short, plain words. Avoid jargon (use 'click rate' not 'CTR').\n"
+            "Style: short, plain words. Avoid jargon (say 'click rate' not 'CTR').\n"
             "Give 3–5 steps. Start lines with a dash (-). Each step max 14 words.\n"
             "Optionally add one 'Example:' line.\n"
+        )
+        sections = "Only output the bullet points (and one optional Example line)."
+    elif style == "biz":
+        tone = (
+            "Audience: SEO lead + Business head + Content editor.\n"
+            "Style: plain English, on-point. Be specific about WHAT to change, WHERE to change, and WHY.\n"
+            "Keep bullets crisp; avoid fluff. No long paragraphs.\n"
+        )
+        sections = (
+            "Output these sections in order:\n"
+            "1) Goal (business) — one line.\n"
+            "2) Target — one line.\n"
+            "3) What to change (exact fields) — 3–6 bullets.\n"
+            "4) Where to change — 2–4 bullets.\n"
+            "5) Why — 1–3 bullets.\n"
+            "6) SERP enhancements — 1–3 bullets (if useful).\n"
+            "7) Internal links (quick wins) — 2–4 bullets.\n"
+            "8) How to measure — one line.\n"
         )
     else:
         tone = (
             "Audience: SEO specialists.\n"
             "Style: concise, technical. 3–5 bullets. Max 20 words each.\n"
         )
+        sections = "Only output the bullets."
+
     return f"""
 Write in English.
 {tone}
@@ -548,7 +686,7 @@ Context rows (CSV):
 {csv_snippet}
 
 Task: For items flagged '{tag}', give the action list.
-Only output the bullet points (and one optional Example line).
+{sections}
 """
 
 def _gemini_generate(prompt: str) -> Optional[str]:
@@ -598,7 +736,7 @@ def _openai_generate(prompt: str) -> Optional[str]:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role":"system","content":"Be a concise SEO optimizer."},
+                    {"role":"system","content":"Be a concise SEO + growth operator."},
                     {"role":"user","content": prompt}
                 ],
                 temperature=0.3
@@ -614,7 +752,7 @@ def _openai_generate(prompt: str) -> Optional[str]:
             resp = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role":"system","content":"Be a concise SEO optimizer."},
+                    {"role":"system","content":"Be a concise SEO + growth operator."},
                     {"role":"user","content": prompt}
                 ],
                 temperature=0.3
@@ -626,12 +764,12 @@ def _openai_generate(prompt: str) -> Optional[str]:
     st.warning("OpenAI SDK not installed. Add 'openai' to requirements.txt.")
     return None
 
-def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int, simple_mode: bool) -> Optional[str]:
+def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int, style: str) -> Optional[str]:
     take = df[df["Mismatch_Tag"] == tag]
     if take.empty:
         return None
     csv_snippet = _format_rows_for_prompt(take, n=n)
-    prompt = _make_prompt(tag, csv_snippet, simple_mode)
+    prompt = _make_prompt(tag, csv_snippet, style)
     if provider == "Gemini":
         return _gemini_generate(prompt)
     else:
@@ -764,7 +902,7 @@ if master_df is None or master_df.empty:
     st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
 
-# ---- Sidebar: thresholds, AI toggles, writing style, date range ----
+# ---- Sidebar: thresholds, AI toggles, recommendation style, date range ----
 with st.sidebar:
     st.subheader("Thresholds")
     TH = CONFIG["thresholds"].copy()
@@ -785,8 +923,9 @@ with st.sidebar:
     max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
 
     st.markdown("---")
-    st.subheader("Writing style")
-    simple_mode = st.checkbox("Use simple language (Editors)", value=True)
+    st.subheader("Recommendation style")
+    style = st.selectbox("Tone & structure", ["SEO + Business (on-point)", "Simple (Editors)", "Technical (SEO)"], index=0)
+    style_key = {"SEO + Business (on-point)": "biz", "Simple (Editors)": "simple", "Technical (SEO)":"technical"}[style]
 
     st.markdown("---")
     st.subheader("Analysis Period")
@@ -833,8 +972,8 @@ st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 # 1) Build mismatch table first
 mismatch_df = build_mismatch_table(filtered_df, TH)
 
-# 2) Build human-readable insight cards (simple if toggled)
-cards = engagement_mismatches(filtered_df, TH, simple_mode=simple_mode)
+# 2) Build human-readable insight cards per selected style
+cards = engagement_mismatches(filtered_df, TH, style=style_key)
 
 # 3) AI recommendations per tag (if enabled), else fallback to canned cards
 if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
@@ -843,7 +982,7 @@ if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Ta
                 "High Bounce @ Good Position"]:
         if (mismatch_df["Mismatch_Tag"] == tag).any():
             st.markdown(f"### {tag}")
-            txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai), simple_mode=simple_mode)
+            txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai), style=style_key)
             if txt:
                 st.markdown(txt)
             else:
@@ -863,8 +1002,8 @@ if mismatch_df is not None and not mismatch_df.empty:
     download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
 else:
     st.info("No mismatch rows matched your thresholds and filters.")
-    
-# 5) Visual: CTR vs Position bubble chart + expected CTR curve (with clear errors)
+
+# 5) Visual: CTR vs Position bubble chart + expected CTR curve (NaN-safe marker sizes)
 try:
     import plotly.express as px
     import plotly.graph_objects as go
@@ -896,12 +1035,9 @@ else:
 
         # Decide whether to size by Impressions
         size_col = None
-        if "Impressions" in vis.columns:
-            # If at least one non-NaN, use it. Fill NaNs with 0 and clip negatives.
-            if vis["Impressions"].notna().any():
-                vis["Impressions"] = vis["Impressions"].fillna(0).clip(lower=0)
-                # If everything became 0, it's still valid; bubbles will be small.
-                size_col = "Impressions"
+        if "Impressions" in vis.columns and vis["Impressions"].notna().any():
+            vis["Impressions"] = vis["Impressions"].fillna(0).clip(lower=0)
+            size_col = "Impressions"
 
         fig = px.scatter(
             vis,
@@ -931,11 +1067,14 @@ st.subheader("🎯 Quick Recommendations")
 if isinstance(cards, list) and len(cards) > 1:
     st.success("**Priority Actions:**")
     for card in cards[:3]:
-        st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}" if "**Recommendation:**" in card else f"- {card.splitlines()[-1]}")
+        # If technical card, pick the rec; if structured, grab last line as a quick action
+        if "**Recommendation:**" in card:
+            st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}")
+        else:
+            parts = [ln for ln in card.splitlines() if ln.strip().startswith("- ")]
+            st.markdown(f"- {parts[0][2:].strip()}" if parts else "- Improve title/intro and add internal links.")
 else:
     st.info("Upload more data or tune thresholds to surface actions.")
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
-
-
