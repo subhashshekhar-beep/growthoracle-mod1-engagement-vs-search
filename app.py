@@ -1,6 +1,6 @@
 # app.py — GrowthOracle (Module 1 only)
-# How to run on Streamlit Cloud: push repo + set Secrets in Cloud UI
-# Required packages: streamlit pandas numpy pyyaml plotly openai google-genai (or google-generativeai)
+# Works on Streamlit Cloud. Use Secrets UI for keys.
+# Requires (add to requirements.txt): streamlit pandas numpy pyyaml plotly openai google-genai (or google-generativeai)
 
 import os, re, sys, json, logging
 from dataclasses import dataclass, field
@@ -11,13 +11,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# --- Optional YAML ---
+# Optional YAML
 try:
     import yaml
 except Exception:
     yaml = None
 
-# --- Try AI SDKs (we'll feature-detect later) ---
+# Try AI SDKs (feature-detect)
 _HAS_OPENAI_CLIENT = False
 _HAS_OPENAI = False
 try:
@@ -26,24 +26,22 @@ try:
     _HAS_OPENAI = True
 except Exception:
     try:
-        import openai  # legacy import if needed later
+        import openai  # legacy if present
         _HAS_OPENAI = True
     except Exception:
         pass
 
-_HAS_GOOGLE_GENAI_NEW = False  # google-genai (new SDK)
+_HAS_GOOGLE_GENAI_NEW = False  # google-genai (new)
 _HAS_GOOGLE_GENAI_OLD = False  # google-generativeai (legacy)
-
 try:
-    from google import genai as _genai_new     # new SDK
+    from google import genai as _genai_new
     from google.genai import types as _genai_types
     _HAS_GOOGLE_GENAI_NEW = True
 except Exception:
     pass
-
 if not _HAS_GOOGLE_GENAI_NEW:
     try:
-        import google.generativeai as _genai_old  # legacy SDK
+        import google.generativeai as _genai_old
         _HAS_GOOGLE_GENAI_OLD = True
     except Exception:
         pass
@@ -138,7 +136,8 @@ class ValidationCollector:
             "context": json.dumps(m.context, ensure_ascii=False)
         } for m in self.messages])
 
-# ---- Helpers ----
+
+# ---- UI helpers ----
 def download_df_button(df: pd.DataFrame, filename: str, label: str):
     if df is None or df.empty:
         st.warning(f"No data to download for {label}")
@@ -229,6 +228,20 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
             prod_map["publish"] = prod_dates[0]
     return prod_map, ga4_map, gsc_map
 
+# ---- Title fallback from URL path ----
+def _fallback_title_from_path(path: str) -> str:
+    if not path or not isinstance(path, str):
+        return ""
+    parts = [p for p in path.strip("/").split("/") if p]
+    if not parts:
+        return ""
+    last = parts[-1]
+    last = re.sub(r"\d+\.cms$", "", last)
+    if not last and len(parts) >= 2:
+        last = parts[-2]
+    last = last.replace("-", " ").strip()
+    return last.title() if last else ""
+
 # ---- Standardization & Merge ----
 def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCollector):
     p = prod_df.copy() if prod_df is not None else None
@@ -311,7 +324,18 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
         merged["L1_Category"] = "Uncategorized"
         merged["L2_Category"] = "General"
 
+    # Title fallback if missing
+    if "Title" in merged.columns:
+        merged["Title"] = merged["Title"].fillna("").astype(str)
+        need = merged["Title"].str.strip().eq("")
+        if "Path" in merged.columns:
+            merged.loc[need, "Title"] = merged.loc[need, "Path"].apply(_fallback_title_from_path)
+        if "Query" in merged.columns:
+            still = merged["Title"].str.strip().eq("")
+            merged.loc[still, "Title"] = merged.loc[still, "Query"].fillna("").astype(str).str.title()
+
     return merged, vc
+
 
 # ---- Module 1 logic ----
 EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
@@ -324,14 +348,38 @@ def _expected_ctr_for_pos(pos: float) -> float:
         return base
     return base * (9.0 / p) ** 0.5  # gentle decay beyond rank 9
 
-def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any]) -> List[str]:
+# Editor-friendly fallback bullets (English only)
+def _simple_actionlines(tag: str, row: Dict[str, Any]) -> List[str]:
+    templates = {
+        "Low CTR @ Good Position": [
+            "Rewrite the headline. Put the main keyword at the start.",
+            "Add a short page description (1–2 lines) that matches the headline.",
+            "Add 2–3 internal links from strong related pages.",
+            "Include a small FAQ with 2–3 common questions."
+        ],
+        "Hidden Gem: High CTR @ Poor Position": [
+            "Link this page from 3–5 high-traffic related pages.",
+            "Expand the intro. Explain the topic in simple words.",
+            "Add subheadings for common search questions.",
+            "Update old facts, numbers, and examples."
+        ],
+        "High Bounce @ Good Position": [
+            "Move the key answer to the first 3–4 lines.",
+            "Shorten long paragraphs. Use bullets for lists.",
+            "Compress heavy images; remove autoplay videos.",
+            "Add a short summary box at the top."
+        ]
+    }
+    return templates.get(tag, ["Make small, clear edits to title, intro, links, and summary."])
+
+def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any], simple_mode: bool = False) -> List[str]:
     if df is None or df.empty:
         return ["No data available for analysis"]
     d = df.copy()
     for c in ["Clicks","Impressions","CTR","Position","bounceRate"]:
         if c in d.columns:
             d[c] = pd.to_numeric(d[c], errors="coerce")
-    insights = []
+    insights: List[str] = []
 
     # Low CTR @ good position
     if {"Position","CTR"}.issubset(d.columns):
@@ -339,28 +387,70 @@ def engagement_mismatches(df: pd.DataFrame, thresholds: Dict[str, Any]) -> List[
         d["deficit_pct"] = np.where(d["expected_ctr"]>0, (d["expected_ctr"]-d["CTR"]) / d["expected_ctr"], np.nan)
         mask = (d["Position"] <= 10) & (d["deficit_pct"] >= (thresholds["ctr_deficit_pct"]/100.0)) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "deficit_pct").iterrows():
-            insights.append(f"""### ⚠️ Low CTR at Good Position
-**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
-**Title:** {str(row.get('Title','Unknown'))[:90]}...
-**Recommendation:** Refresh title/meta, add rich snippets, and tighten intro to match dominant intent.""")
+            msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
+            title_txt = str(row.get('Title') or '').strip() or "(title missing)"
+            show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
+            if simple_mode:
+                steps = _simple_actionlines("Low CTR @ Good Position", row)
+                bullet = "\n".join([f"- {s}" for s in steps])
+                insights.append(
+                    f"### ⚠️ Low clicks even though top on Google\n"
+                    f"{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n"
+                    f"{show_title}\n{bullet}"
+                )
+            else:
+                insights.append(
+                    f"""### ⚠️ Low CTR at Good Position
+{msid_txt} | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+{show_title}
+**Recommendation:** Refresh title/meta, add rich snippets, and tighten intro to match dominant intent."""
+                )
 
     # Hidden gems
     if {"Position","CTR"}.issubset(d.columns):
         mask = (d["Position"] > 15) & (d["CTR"] > 0.05) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "CTR").iterrows():
-            insights.append(f"""### 💎 Hidden Gem (High CTR @ Poor Position)
-**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
-**Title:** {str(row.get('Title','Unknown'))[:90]}...
-**Recommendation:** Strengthen internal links + on-page SEO to lift ranking; content already resonates.""")
+            msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
+            title_txt = str(row.get('Title') or '').strip() or "(title missing)"
+            show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
+            if simple_mode:
+                steps = _simple_actionlines("Hidden Gem: High CTR @ Poor Position", row)
+                bullet = "\n".join([f"- {s}" for s in steps])
+                insights.append(
+                    f"### 💎 Hidden Gem (people like it, but rank is low)\n"
+                    f"{msid_txt} | **Position:** {row['Position']:.1f} | **Click rate:** {row['CTR']:.2%}\n"
+                    f"{show_title}\n{bullet}"
+                )
+            else:
+                insights.append(
+                    f"""### 💎 Hidden Gem (High CTR @ Poor Position)
+{msid_txt} | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+{show_title}
+**Recommendation:** Strengthen internal links + on-page SEO to lift ranking; content already resonates."""
+                )
 
     # High bounce
     if {"bounceRate","Position"}.issubset(d.columns):
         mask = (d["bounceRate"] > 0.70) & (d["Position"] <= 15) & (d.get("Impressions", 0) >= thresholds.get("min_impressions", 0))
         for _, row in d[mask].nlargest(2, "bounceRate").iterrows():
-            insights.append(f"""### 🚨 High Bounce at Good Position
-**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}` | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}
-**Title:** {str(row.get('Title','Unknown'))[:90]}...
-**Recommendation:** Re-check search intent, improve above-the-fold clarity, compress media, and add TOC anchors.""")
+            msid_txt = f"**MSID:** `{int(row.get('msid')) if not pd.isna(row.get('msid')) else 'N/A'}`"
+            title_txt = str(row.get('Title') or '').strip() or "(title missing)"
+            show_title = f"**Title:** {title_txt[:90]}{'...' if len(title_txt)>90 else ''}"
+            if simple_mode:
+                steps = _simple_actionlines("High Bounce @ Good Position", row)
+                bullet = "\n".join([f"- {s}" for s in steps])
+                insights.append(
+                    f"### 🚨 People leave quickly even though rank is good\n"
+                    f"{msid_txt} | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}\n"
+                    f"{show_title}\n{bullet}"
+                )
+            else:
+                insights.append(
+                    f"""### 🚨 High Bounce at Good Position
+{msid_txt} | **Position:** {row['Position']:.1f} | **Bounce:** {row['bounceRate']:.1%}
+{show_title}
+**Recommendation:** Re-check search intent, improve above-the-fold clarity, compress media, and add TOC anchors."""
+                )
 
     if not insights:
         insights.append("No specific mismatches detected at current thresholds.")
@@ -407,9 +497,10 @@ def build_mismatch_table(df: pd.DataFrame, thresholds: Dict[str, Any]) -> pd.Dat
     ] if c in d.columns]
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"]) if not d.empty else pd.DataFrame()
 
+
+
 # ---------- AI helpers ----------
 def _get_secret(key: str, sections=("google","gemini","general")) -> Optional[str]:
-    """Read secret from Streamlit Cloud Secrets UI (or env)."""
     try:
         if key in st.secrets and st.secrets[key]:
             return st.secrets[key]
@@ -437,23 +528,35 @@ def _format_rows_for_prompt(df: pd.DataFrame, n: int = 8) -> str:
         small["expected_ctr"] = (small["expected_ctr"]*100).round(2)
     return small.to_csv(index=False)
 
-def _make_prompt(tag: str, csv_snippet: str) -> str:
+def _make_prompt(tag: str, csv_snippet: str, simple_mode: bool) -> str:
+    if simple_mode:
+        tone = (
+            "Audience: newsroom content editors (non-technical).\n"
+            "Style: short, plain words. Avoid jargon (use 'click rate' not 'CTR').\n"
+            "Give 3–5 steps. Start lines with a dash (-). Each step max 14 words.\n"
+            "Optionally add one 'Example:' line.\n"
+        )
+    else:
+        tone = (
+            "Audience: SEO specialists.\n"
+            "Style: concise, technical. 3–5 bullets. Max 20 words each.\n"
+        )
     return f"""
-You are an SEO growth analyst. Given rows flagged as '{tag}', write 3–5 specific, high-impact recommendations.
-Be concrete and article-ready (titles, meta patterns, internal link anchors, schema suggestions).
-Prioritize: quickest lift first. Keep items short (max 20 words each). Use bullets only.
-Rows (CSV):
+Write in English.
+{tone}
+Context rows (CSV):
 {csv_snippet}
+
+Task: For items flagged '{tag}', give the action list.
+Only output the bullet points (and one optional Example line).
 """
 
 def _gemini_generate(prompt: str) -> Optional[str]:
-    # Prefer new SDK (google-genai) with stable v1, else fall back to legacy (google-generativeai)
     api_key = _get_secret("GOOGLE_API_KEY")
     if not api_key:
         st.warning("Google key missing. Set GOOGLE_API_KEY in Streamlit Cloud → Settings → Secrets.")
         return None
 
-    # New SDK path
     if _HAS_GOOGLE_GENAI_NEW:
         try:
             client = _genai_new.Client(
@@ -461,18 +564,16 @@ def _gemini_generate(prompt: str) -> Optional[str]:
                 http_options=_genai_types.HttpOptions(api_version="v1"),
             )
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",  # fast, current
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             text = getattr(resp, "text", None)
             if not text and hasattr(resp, "candidates"):
-                # very defensive fallback
                 text = "\n".join([getattr(c, "text", "") for c in resp.candidates if getattr(c, "text", "")])
             return (text or "").strip() or None
         except Exception as e:
             st.warning(f"Gemini (google-genai) failed: {e}")
 
-    # Legacy SDK path (works if installed)
     if _HAS_GOOGLE_GENAI_OLD:
         try:
             _genai_old.configure(api_key=api_key)
@@ -491,7 +592,6 @@ def _openai_generate(prompt: str) -> Optional[str]:
         st.warning("OpenAI key missing. Set OPENAI_API_KEY in Streamlit Cloud → Settings → Secrets.")
         return None
 
-    # Modern SDK path
     if _HAS_OPENAI_CLIENT:
         try:
             client = OpenAI(api_key=api_key)
@@ -507,7 +607,6 @@ def _openai_generate(prompt: str) -> Optional[str]:
         except Exception as e:
             st.warning(f"OpenAI (new SDK) failed: {e}")
 
-    # Legacy fallback (if available)
     if _HAS_OPENAI and not _HAS_OPENAI_CLIENT:
         try:
             import openai
@@ -527,12 +626,12 @@ def _openai_generate(prompt: str) -> Optional[str]:
     st.warning("OpenAI SDK not installed. Add 'openai' to requirements.txt.")
     return None
 
-def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int = 8) -> Optional[str]:
+def ai_recommendations(tag: str, df: pd.DataFrame, provider: str, n: int, simple_mode: bool) -> Optional[str]:
     take = df[df["Mismatch_Tag"] == tag]
     if take.empty:
         return None
     csv_snippet = _format_rows_for_prompt(take, n=n)
-    prompt = _make_prompt(tag, csv_snippet)
+    prompt = _make_prompt(tag, csv_snippet, simple_mode)
     if provider == "Gemini":
         return _gemini_generate(prompt)
     else:
@@ -665,7 +764,7 @@ if master_df is None or master_df.empty:
     st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
 
-# ---- Sidebar: thresholds, AI toggles, date range (AFTER data is ready) ----
+# ---- Sidebar: thresholds, AI toggles, writing style, date range ----
 with st.sidebar:
     st.subheader("Thresholds")
     TH = CONFIG["thresholds"].copy()
@@ -681,10 +780,13 @@ with st.sidebar:
         ai_note.append("OpenAI SDK missing")
     if ai_note:
         st.caption("• " + " • ".join(ai_note) + " — check requirements.txt")
-
     use_ai = st.checkbox("Use AI-generated recommendations", value=False)
     provider = st.selectbox("LLM Provider", ["OpenAI", "Gemini"], index=0, disabled=not use_ai)
     max_rows_for_ai = st.slider("Rows per bucket (AI prompt)", 3, 20, 8, disabled=not use_ai)
+
+    st.markdown("---")
+    st.subheader("Writing style")
+    simple_mode = st.checkbox("Use simple language (Editors)", value=True)
 
     st.markdown("---")
     st.subheader("Analysis Period")
@@ -718,64 +820,64 @@ else:
 
 st.success(f"✅ Master dataset ready: {filtered_df.shape[0]:,} rows × {filtered_df.shape[1]} columns")
 
-if st.session_state.get("Steps") == "4) Analyze (Module 1)":
-    pass  # just in case, but we don't rely on this key
+# If not on Analyze step, stop here
+if step != "4) Analyze (Module 1)":
+    st.info("Move to **Step 4** to run the Engagement vs Search analysis.")
+    st.stop()
 
-# Move on only if user chose step 4
-if st.session_state.get("radio") if "radio" in st.session_state else True:
-    # We already enforce step flow with st.stop() earlier.
+# -----------------------------
+# ANALYSIS — Module 1 outputs
+# -----------------------------
+st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
 
-    # -----------------------------
-    # ANALYSIS — Module 1 outputs
-    # -----------------------------
-    st.header("📊 Module 1: Engagement vs Search — Insights & Exports")
+# 1) Build mismatch table first
+mismatch_df = build_mismatch_table(filtered_df, TH)
 
-    # 1) Build mismatch table first
-    mismatch_df = build_mismatch_table(filtered_df, TH)
+# 2) Build human-readable insight cards (simple if toggled)
+cards = engagement_mismatches(filtered_df, TH, simple_mode=simple_mode)
 
-    # 2) Build human-readable insight cards
-    cards = engagement_mismatches(filtered_df, TH)
+# 3) AI recommendations per tag (if enabled), else fallback to canned cards
+if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
+    for tag in ["Low CTR @ Good Position",
+                "Hidden Gem: High CTR @ Poor Position",
+                "High Bounce @ Good Position"]:
+        if (mismatch_df["Mismatch_Tag"] == tag).any():
+            st.markdown(f"### {tag}")
+            txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai), simple_mode=simple_mode)
+            if txt:
+                st.markdown(txt)
+            else:
+                for c in cards:
+                    if tag in c:
+                        st.markdown(c)
+                        break
+else:
+    for card in cards:
+        st.markdown(card)
 
-    # 3) AI recommendations per tag (if enabled), else fallback to canned cards
-    if use_ai and mismatch_df is not None and not mismatch_df.empty and "Mismatch_Tag" in mismatch_df.columns:
-        for tag in ["Low CTR @ Good Position",
-                    "Hidden Gem: High CTR @ Poor Position",
-                    "High Bounce @ Good Position"]:
-            if (mismatch_df["Mismatch_Tag"] == tag).any():
-                st.markdown(f"### {tag}")
-                txt = ai_recommendations(tag, mismatch_df, provider, n=int(max_rows_for_ai))
-                if txt:
-                    st.markdown(txt)
-                else:
-                    # fallback to a canned card of same type
-                    for c in cards:
-                        if tag in c:
-                            st.markdown(c)
-                            break
-    else:
-        for card in cards:
-            st.markdown(card)
+# 4) Show table + export
+if mismatch_df is not None and not mismatch_df.empty:
+    st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
+    with st.expander("Preview mismatch rows (first 200)", expanded=False):
+        st.dataframe(mismatch_df.head(200), use_container_width=True, hide_index=True)
+    download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
+else:
+    st.info("No mismatch rows matched your thresholds and filters.")
 
-    # 4) Show table + export
-    if mismatch_df is not None and not mismatch_df.empty:
-        st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
-        with st.expander("Preview mismatch rows (first 200)", expanded=False):
-            st.dataframe(mismatch_df.head(200), use_container_width=True, hide_index=True)
-        download_df_button(mismatch_df, f"module1_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download ALL mismatch rows (CSV)")
-    else:
-        st.info("No mismatch rows matched your thresholds and filters.")
-
-    # 5) Visual: CTR vs Position bubble chart + expected CTR curve
+# 5) Visual: CTR vs Position bubble chart + expected CTR curve (with clear errors)
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+except Exception as e:
+    st.error(f"Plotly is not available. Add 'plotly' to requirements.txt. Details: {e}")
+else:
     try:
-        import plotly.express as px
-        import plotly.graph_objects as go
-
         vis = filtered_df.copy()
         for c in ["Position","CTR","Impressions"]:
             if c in vis.columns:
                 vis[c] = pd.to_numeric(vis[c], errors="coerce")
 
-        # Attach tags (if available) for coloring
+        # Attach tags for coloring (if we have keys)
         if mismatch_df is not None and not mismatch_df.empty:
             key_cols = [c for c in ["msid","Query"] if c in vis.columns and c in mismatch_df.columns]
             if key_cols:
@@ -798,19 +900,20 @@ if st.session_state.get("radio") if "radio" in st.session_state else True:
 
         fig.update_layout(yaxis_tickformat=".0%", xaxis_title="Average Position", yaxis_title="CTR")
         st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error("Chart failed. See error below:")
+        st.exception(e)
 
-    except Exception:
-        st.info("Install Plotly for charts: `pip install plotly`.")
-
-    # 6) Summary actions
-    st.divider()
-    st.subheader("🎯 Quick Recommendations")
-    if isinstance(cards, list) and len(cards) > 1:
-        st.success("**Priority Actions:**")
-        for card in cards[:3]:
-            st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}")
-    else:
-        st.info("Upload more data or tune thresholds to surface actions.")
+# 6) Summary actions
+st.divider()
+st.subheader("🎯 Quick Recommendations")
+if isinstance(cards, list) and len(cards) > 1:
+    st.success("**Priority Actions:**")
+    for card in cards[:3]:
+        st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}" if "**Recommendation:**" in card else f"- {card.splitlines()[-1]}")
+else:
+    st.info("Upload more data or tune thresholds to surface actions.")
 
 st.markdown("---")
 st.caption("GrowthOracle — Module 1 (Standalone)")
+
