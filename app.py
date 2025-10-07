@@ -244,9 +244,17 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
                 "impr": "Impressions", "ctr": "CTR", "pos": "Position"}
     }
     try:
-        if prod_df is not None: prod_df.rename(columns={v: k for k, v in std_names["prod"].items()}, inplace=True)
-        if ga4_df is not None: ga4_df.rename(columns={v: k for k, v in std_names["ga4"].items()}, inplace=True)
-        if gsc_df is not None: gsc_df.rename(columns={v: k for k, v in std_names["gsc"].items()}, inplace=True)
+        # --- FIX START: Corrected the rename logic ---
+        if prod_df is not None:
+            prod_rename_map = {v: std_names["prod"][k] for k, v in prod_map.items() if k in std_names["prod"]}
+            prod_df.rename(columns=prod_rename_map, inplace=True)
+        if ga4_df is not None:
+            ga4_rename_map = {v: std_names["ga4"][k] for k, v in ga4_map.items() if k in std_names["ga4"]}
+            ga4_df.rename(columns=ga4_rename_map, inplace=True)
+        if gsc_df is not None:
+            gsc_rename_map = {v: std_names["gsc"][k] for k, v in gsc_map.items() if k in std_names["gsc"]}
+            gsc_df.rename(columns=gsc_rename_map, inplace=True)
+        # --- FIX END ---
     except Exception as e:
         vc.add("Critical", "RENAME_FAIL", f"Column renaming failed: {e}")
         return None, vc
@@ -284,8 +292,13 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
         vc.add("Critical", "MERGE_PREP_FAIL", "GSC or Production data is missing or empty after cleaning.")
         return None, vc
     
-    prod_cols = ["msid", "Title", "Path", "Publish Time"]
-    merged = pd.merge(gsc_df, prod_df[prod_cols].drop_duplicates(subset=["msid"]), on="msid", how="left")
+    # --- FIX START: Added a defensive check for columns ---
+    prod_cols_to_merge = [c for c in ["msid", "Title", "Path", "Publish Time"] if c in prod_df.columns]
+    if "msid" not in prod_cols_to_merge:
+        vc.add("Critical", "MERGE_FAIL", "The 'msid' column is missing from Production data after renaming.")
+        return None, vc
+    merged = pd.merge(gsc_df, prod_df[prod_cols_to_merge].drop_duplicates(subset=["msid"]), on="msid", how="left")
+    # --- FIX END ---
 
     # 4. Merge GA4 data (optional)
     if ga4_df is not None and not ga4_df.empty and "msid" in ga4_df.columns:
